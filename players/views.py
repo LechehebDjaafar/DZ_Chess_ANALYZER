@@ -334,3 +334,104 @@ def fetch_player_data(request):
             'success': False,
             'error': f'خطأ في معالجة البيانات: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+from analysis.tasks import analyze_player_background, simulate_chess_analysis
+from celery.result import AsyncResult
+from django.http import JsonResponse
+
+@api_view(['POST'])
+def start_player_analysis(request):
+    """بدء تحليل اللاعب باستخدام Celery"""
+    username = request.data.get('username')
+    
+    if not username:
+        return Response({
+            'success': False,
+            'error': 'اسم المستخدم مطلوب'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        # التحقق من وجود اللاعب
+        Player.objects.get(username=username)
+        
+        # تشغيل مهمة التحليل في الخلفية
+        task = analyze_player_background.delay(username)
+        
+        return Response({
+            'success': True,
+            'message': f'تم بدء تحليل اللاعب {username} في الخلفية',
+            'task_id': task.id,
+            'status_url': f'/api/players/task-status/{task.id}/'
+        })
+        
+    except Player.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'اللاعب غير موجود'
+        }, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['GET'])
+def task_status(request, task_id):
+    """التحقق من حالة مهمة Celery"""
+    try:
+        task_result = AsyncResult(task_id)
+        
+        if task_result.state == 'PENDING':
+            response = {
+                'state': task_result.state,
+                'status': 'في الانتظار...'
+            }
+        elif task_result.state == 'PROGRESS':
+            response = {
+                'state': task_result.state,
+                'current': task_result.info.get('current', 0),
+                'total': task_result.info.get('total', 1),
+                'status': task_result.info.get('status', '')
+            }
+        elif task_result.state == 'SUCCESS':
+            response = {
+                'state': task_result.state,
+                'result': task_result.info
+            }
+        else:  # FAILURE
+            response = {
+                'state': task_result.state,
+                'error': str(task_result.info)
+            }
+            
+        return Response(response)
+        
+    except Exception as e:
+        return Response({
+            'state': 'ERROR',
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+def create_mock_data(request):
+    """إنشاء بيانات وهمية للاختبار باستخدام Celery"""
+    username = request.data.get('username')
+    game_count = request.data.get('game_count', 30)
+    
+    if not username:
+        return Response({
+            'success': False,
+            'error': 'اسم المستخدم مطلوب'
+        })
+    
+    try:
+        player = Player.objects.get(username=username)
+        
+        # تشغيل مهمة إنشاء البيانات الوهمية
+        task = simulate_chess_analysis.delay(player.id, game_count)
+        
+        return Response({
+            'success': True,
+            'message': f'تم بدء إنشاء {game_count} مباراة وهمية للاعب {username}',
+            'task_id': task.id
+        })
+        
+    except Player.DoesNotExist:
+        return Response({
+            'success': False,
+            'error': 'اللاعب غير موجود'
+        }, status=status.HTTP_404_NOT_FOUND)
